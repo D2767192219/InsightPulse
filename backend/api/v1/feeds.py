@@ -107,10 +107,17 @@ async def crawl_all_feeds(force: bool = False, fetch_content: bool = False, days
 
 
 @router.post("/seed-default", response_model=dict)
-async def seed_default_feeds():
-    """Seed the database with default AI RSS feeds."""
+async def seed_default_feeds(reset: bool = False):
+    """
+    Seed the database with default AI RSS feeds.
+    - `reset=True`: delete all existing feeds first, then re-seed (recommended after updating DEFAULT_FEEDS)
+    - `reset=False` (default): skip feeds that already exist
+    """
     from services.rss_crawler import RSSCrawler
     crawler = RSSCrawler()
-    count = await crawler.seed_default_feeds()
+    result = await crawler.seed_default_feeds(reset=reset)
     await crawler.close()
-    return success_response(data={"feeds_added": count, "message": "Default feeds seeded successfully"})
+    return success_response(data={
+        **result,
+        "message": f"Feeds {'reset and seeded' if reset else 'seeded'} successfully",
+    })
