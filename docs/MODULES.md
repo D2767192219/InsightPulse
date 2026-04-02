@@ -24,9 +24,12 @@
 | **热点发现 Agent** | `agents/hot_topics/agent.py` | 识别 AI 领域最热话题，SortNode→ScoreNode→RankNode 流水线 |
 | **深度总结 Agent** | `agents/deep_summary/agent.py` | 重要事件深度摘要，What/Who/Why/Impact 结构化输出 |
 | **趋势洞察 Agent** | `agents/trend/agent.py` | 四维度趋势分析（技术/应用/政策/资本），4 个 Sub-Nodes 并行 |
+| **信号评分引擎** | `services/scoring_engine.py` | 6 大维度信号评分（Authority/Academic/Community/Recency/Quality/Novelty），综合热度分计算，含 ClusteringEngine 新兴主题检测 |
+| **信号计算 API** | `api/v1/signals.py` | 批量计算信号、信号统计、每日趋势、高分排行、来源分布、权重配置接口 |
 | **报告聚合 Agent** | `agents/report_composer/agent.py` | 汇总三路输出，生成 JSON + Markdown 双格式日报 |
 | **环境变量示例** | `env.example` | 包含豆包 1.8 及主流模型配置说明 |
 | **架构设计文档** | `guide/multi-agent-daily-report-architecture.md` | 多智能体日报模块完整架构设计 |
+| **AI 信号工程设计** | `docs/v2-ai-signals-engineering.md` | 信号工程完整设计文档（6 维度评分体系、半衰期衰减、TF-ICF 新颖性等） |
 | **单元测试** | `tests/test_models.py` | 模型验证测试 |
 | **单元测试** | `tests/test_rss_crawler.py` | 爬虫核心逻辑测试 |
 | **单元测试** | `tests/test_responses.py` | 响应工具测试 |
@@ -65,6 +68,17 @@
 | `GET` | `/api/v1/feeds/{id}/crawl` | 手动爬取指定源 |
 | `POST` | `/api/v1/feeds/crawl-all` | 全量爬取所有启用的源 |
 | `POST` | `/api/v1/feeds/seed-default` | 写入 8 个默认 AI 源 |
+
+### Signals（信号工程）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/v1/signals/compute` | 批量计算信号（最近 N 天文章，6 维度评分 + 综合热度分） |
+| `GET` | `/api/v1/signals/stats` | 信号分布统计（均值/p50/p90，各来源类型分布，高分预览） |
+| `GET` | `/api/v1/signals/daily` | 每日信号趋势（折线图数据，N 天均值趋势） |
+| `GET` | `/api/v1/signals/top` | 高分文章排行（支持按维度排序，含完整信号分项明细） |
+| `GET` | `/api/v1/signals/sources` | 来源权威性分布（各来源类型文章数量和平均权威性） |
+| `GET` | `/api/v1/signals/weights` | 当前权重配置（DEFAULT_WEIGHTS、维度说明，供前端调参） |
 
 ### Reports（多智能体日报）
 
@@ -129,6 +143,36 @@
 
 ---
 
+## 信号工程模块
+
+### 六大信号维度
+
+| 维度 | 名称 | 评分逻辑 |
+|------|------|---------|
+| **Authority** | 来源权威性 | 官方首发最高 3.0，学术顶刊 2.5，媒体 1.8，社区聚合 1.0 |
+| **Academic** | 学术性 | arXiv 引用数 + 子域权重 + 代码/数据集存在标志 |
+| **Community** | 社区共鸣 | HackerNews 分数/评论归一化，无 HN 数据则为 0 |
+| **Recency** | 时效性 | 内容类型半衰期衰减：官方快讯 6h，论文 48h，深度分析 72h |
+| **Quality** | 内容质量 | 摘要长度 + 阅读时长 + 技术词汇密度综合得分 0-1 |
+| **Novelty** | 语义新颖性 | TF-ICF + 跨簇唯一性，由 ClusteringEngine 更新，默认 1.0 |
+
+### 综合评分公式
+
+```
+composite = authority×w1 + recency×w2 + quality×w3 + community×w4
+          + novelty×w5 + academic×w6 + controversy_boost + breakthrough_boost
+```
+
+默认权重：`w1=0.25, w2=0.20, w3=0.20, w4=0.15, w5=0.10, w6=0.10`
+
+### ClusteringEngine（新兴主题检测）
+
+- 基于 TF-ICF 关键词聚类，自动识别新兴主题
+- 被标记为 `is_emerging=1` 的文章获得新颖性加成
+- 语义新颖性分由聚类引擎实时更新
+
+---
+
 ## 启动方式
 
 ```bash
@@ -156,3 +200,4 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | 2026-04-02 | 初始模块文档，涵盖 RSS 自动爬取 AI 资讯功能全部模块 |
 | 2026-04-02 | 存储层从 MongoDB (Docker) 迁移至 SQLite（aiosqlite），移除 Docker 依赖，MVP 更轻量 |
 | 2026-04-02 | 新增多智能体日报模块：Orchestrator + HotTopics + DeepSummary + Trend + Report Composer Agent，Fan-Out/Fan-In 并行架构，支持豆包 1.8 及主流模型 |
+| 2026-04-02 | 新增信号工程模块（`scoring_engine.py`）：6 大维度评分（Authority/Academic/Community/Recency/Quality/Novelty），综合热度分，半衰期衰减，ClusteringEngine 新兴主题检测；配套 `signals.py` API：批量计算、统计趋势、高分排行、来源分布、权重配置 |

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Query
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 import json
+from dateutil import parser as dateparser
 
 from core.database import get_database, db as global_db
 from core.responses import success_response, error_response
@@ -46,54 +47,141 @@ async def list_articles(
     source: Optional[str] = Query(None, description="Filter by source"),
     feed_id: Optional[str] = Query(None, description="Filter by feed ID"),
     keyword: Optional[str] = Query(None, description="Search in title/summary"),
-    start_date: Optional[datetime] = Query(None, description="Filter articles from this date"),
-    end_date: Optional[datetime] = Query(None, description="Filter articles until this date"),
+    start_date: Optional[str] = Query(None, description="Filter articles from this date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Filter articles until this date (YYYY-MM-DD)"),
     language: Optional[str] = Query(None, description="Filter by language: en / zh / mixed"),
     has_content: Optional[bool] = Query(None, description="Filter articles with full content fetched"),
+    include_signals: bool = Query(
+        False,
+        description="Join with articles_signals table to include signal scores",
+    ),
+    signal_date: Optional[str] = Query(
+        None,
+        description="Signal date (YYYY-MM-DD). Defaults to today. Only used when include_signals=True",
+    ),
 ):
-    """List articles with pagination and filtering."""
+    """
+    List articles with pagination and filtering.
+
+    When include_signals=True, joins with articles_signals table and returns
+    composite_score, authority_score, recency_score, content_quality_score, and
+    community_score for each article.
+    """
+    from datetime import datetime as dt
     conn = get_database()
     conditions = []
     params = []
+    offset = (page - 1) * page_size
 
     if source:
-        conditions.append("source = ?")
+        conditions.append("a.source = ?")
         params.append(source)
     if feed_id:
-        conditions.append("feed_id = ?")
+        conditions.append("a.feed_id = ?")
         params.append(feed_id)
     if keyword:
-        conditions.append("(title LIKE ? OR summary LIKE ?)")
+        conditions.append("(a.title LIKE ? OR a.summary LIKE ?)")
         params.extend([f"%{keyword}%", f"%{keyword}%"])
-    if start_date:
-        conditions.append("published_at >= ?")
-        params.append(start_date.isoformat())
-    if end_date:
-        conditions.append("published_at <= ?")
-        params.append(end_date.isoformat())
+    # parse date strings safely
+    def _parse_date(val: Optional[str]) -> Optional[str]:
+        if not val:
+            return None
+        try:
+            return dateparser.parse(val).isoformat()
+        except Exception:
+            return None
+
+    start_iso = _parse_date(start_date)
+    end_iso = _parse_date(end_date)
+
+    if start_iso:
+        conditions.append("a.published_at >= ?")
+        params.append(start_iso)
+    if end_iso:
+        conditions.append("a.published_at <= ?")
+        params.append(end_iso)
     if language:
-        conditions.append("language = ?")
+        conditions.append("a.language = ?")
         params.append(language)
     if has_content is not None:
-        conditions.append("content_fetched = ?")
+        conditions.append("a.content_fetched = ?")
         params.append(1 if has_content else 0)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-    async with conn.execute(f"SELECT COUNT(*) as cnt FROM articles {where_clause}", params) as cursor:
+    if include_signals:
+        sig_date = signal_date or dt.now(timezone.utc).strftime("%Y-%m-%d")
+        # Keep articles as the driving table; signal fields are optional.
+        # Do not put s.date in WHERE, otherwise LEFT JOIN degrades to INNER JOIN.
+        signal_where = where_clause
+
+        count_sql = f"""
+            SELECT COUNT(*) as cnt
+            FROM articles a
+            {where_clause}
+        """
+        list_sql = f"""
+            SELECT
+                a.*,
+                s.composite_score,
+                s.authority_score,
+                s.recency_score,
+                s.content_quality_score,
+                s.engagement_score AS community_score,
+                s.citation_count,
+                NULL AS content_type,
+                s.score_breakdown AS signal_breakdown
+            FROM articles a
+            LEFT JOIN articles_signals s ON a.id = s.article_id AND s.date = ?
+            {signal_where}
+            ORDER BY s.composite_score DESC, a.published_at DESC
+            LIMIT ? OFFSET ?
+        """
+        count_params = params
+        list_params = [sig_date] + params + [page_size, offset]
+    else:
+        count_sql = f"SELECT COUNT(*) as cnt FROM articles a {where_clause}"
+        count_params = params
+        list_sql = f"""
+            SELECT a.* FROM articles a
+            {where_clause}
+            ORDER BY a.published_at DESC
+            LIMIT ? OFFSET ?
+        """
+        list_params = params + [page_size, offset]
+
+    async with conn.execute(count_sql, count_params) as cursor:
         row = await cursor.fetchone()
         total = row["cnt"]
 
     pages = (total + page_size - 1) // page_size if total > 0 else 1
-    offset = (page - 1) * page_size
 
-    async with conn.execute(
-        f"SELECT * FROM articles {where_clause} ORDER BY published_at DESC LIMIT ? OFFSET ?",
-        params + [page_size, offset]
-    ) as cursor:
-        rows = await cursor.fetchall()
-
-    articles = [_row_to_article(row) for row in rows]
+    if include_signals:
+        async with conn.execute(list_sql, list_params) as cursor:
+            rows = await cursor.fetchall()
+        articles = []
+        for row in rows:
+            d = _row_to_article(row)
+            if row["composite_score"] is not None:
+                d["composite_score"] = row["composite_score"]
+                d["authority_score"] = row["authority_score"]
+                d["recency_score"] = row["recency_score"]
+                d["content_quality_score"] = row["content_quality_score"]
+                d["community_score"] = row["community_score"]
+                d["citation_count"] = row["citation_count"]
+                d["content_type"] = row["content_type"]
+                try:
+                    bd = row["signal_breakdown"]
+                    d["signal_breakdown"] = json.loads(bd) if bd else {}
+                except Exception:
+                    d["signal_breakdown"] = {}
+            else:
+                d["composite_score"] = None
+            articles.append(d)
+    else:
+        async with conn.execute(list_sql, list_params) as cursor:
+            rows = await cursor.fetchall()
+        articles = [_row_to_article(row) for row in rows]
 
     return success_response(data={
         "items": articles,

@@ -281,16 +281,16 @@ class LLMClient:
         except json.JSONDecodeError:
             pass
 
-        # 尝试提取 JSON 对象
-        match = re.search(r"\{.*\}", text, re.DOTALL)
+        # 尝试非贪婪提取 JSON 对象（修复：使用非贪婪匹配避免过度捕获）
+        match = re.search(r"\{[\s\S]*?\}", text)
         if match:
             try:
                 return json.loads(match.group())
             except json.JSONDecodeError:
                 pass
 
-        # 尝试提取 JSON 数组
-        match = re.search(r"\[.*\]", text, re.DOTALL)
+        # 尝试提取 JSON 数组（非贪婪）
+        match = re.search(r"\[[\s\S]*?\]", text)
         if match:
             try:
                 return json.loads(match.group())

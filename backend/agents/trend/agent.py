@@ -2,18 +2,26 @@
 # agents/trend/agent.py
 #
 # Trend Agent — 趋势洞察
-# 内部结构：4 个 Sub-Nodes 并行（Tech / App / Policy / Capital）
-# 汇总后输出：技术趋势 / 应用趋势 / 政策趋势 / 资本趋势
+#
+# 内部结构（V2 增强）：
+#   4 个 Sub-Nodes 并行（Tech / App / Policy / Capital）
+#   每个 Sub-Node 优先围绕 Agent1/2 的锚点提取相关文章
+#
+# 串行流水线：
+#   输入: context + signal_ctx + ht_result + ds_result
+#   策略: PEST/SWOT 的每条结论必须锚定到具体事件/热点
+#   输出: PEST + SWOT + 3-7天趋势预测
 # ─────────────────────────────────────────────────────────────────────────────
 
 import logging
 import asyncio
-from dataclasses import dataclass
+from typing import Optional
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
 
-# 各维度的 System Prompt
+# 各维度的 System Prompt（V2 增强：注入锚点上下文）
 DIM_SYSTEM_PROMPTS = {
     "tech": """\
 你是一名 AI 技术趋势分析师。你的任务是识别今日 AI 领域的技术动态。
@@ -121,25 +129,36 @@ DIM_LABELS = {
 }
 
 
-@dataclass
 class DailyReportContext:
-    """由 Orchestrator 构建的统一上下文"""
+    """统一上下文"""
     date: str
     articles_count: int
-    articles: list[dict]
-    sources: list[str]
+    articles: list[dict] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
     language: str = "mixed"
+
+
+class SignalContext:
+    """信号工程层输出"""
+    date: str
+    scored_articles: list[dict] = field(default_factory=list)
+    top_articles: list[dict] = field(default_factory=list)
+    top_events_articles: list[dict] = field(default_factory=list)
+    signal_summary: dict = field(default_factory=dict)
+    top_articles_by_source: dict = field(default_factory=dict)
+    sentiment_summary: dict = field(default_factory=dict)
+    clusters: list[dict] = field(default_factory=list)
+    emerging_clusters: list[dict] = field(default_factory=list)
 
 
 class TrendAgent:
     """
     趋势洞察 Agent
 
-    内部结构：4 个 Sub-Nodes 并行执行
-      TechTrendNode   → 技术突破与路线竞争
-      AppTrendNode    → 商业落地与应用扩散
-      PolicyNode      → 监管动态与政策利好
-      CapitalNode     → 融资并购与资本流向
+    内部结构（V2 增强）：
+    - 4 个 Sub-Nodes 并行执行（内并行）
+    - 每个 Sub-Node 优先从锚点相关的文章中提取（外串行）
+    - 锚点来源：Agent1 HotTopics 的热点 + Agent2 DeepSummary 的事件
 
     汇总：提取跨维度高置信度信号
     """
@@ -147,22 +166,22 @@ class TrendAgent:
     def __init__(self, llm_client):
         self.llm = llm_client
 
-    async def analyze(self, context: DailyReportContext) -> dict:
+    async def analyze(
+        self,
+        context: DailyReportContext,
+        signal_ctx: Optional[SignalContext] = None,
+        ht_result: Optional[dict] = None,
+        ds_result: Optional[dict] = None,
+        fast_mode: bool = False,
+    ) -> dict:
         """
         执行趋势洞察分析
 
         Args:
             context: Orchestrator 构建的统一上下文
-
-        Returns:
-            {
-                "date": str,
-                "tech_trend": {...},
-                "app_trend": {...},
-                "policy_trend": {...},
-                "capital_trend": {...},
-                "cross_dimension_signals": [...]
-            }
+            signal_ctx: 信号工程层输出（V2 新增）
+            ht_result: Agent1 HotTopics 输出（V2 新增，热点锚点）
+            ds_result: Agent2 DeepSummary 输出（V2 新增，事件上下文）
         """
         logger.info(
             f"[TrendAgent] 开始分析，共 {context.articles_count} 篇文章，"
@@ -171,7 +190,9 @@ class TrendAgent:
 
         # ── 并行执行 4 个 Sub-Nodes ────────────────────────────────────
         tasks = [
-            self._analyze_dimension(context, dim_key)
+            self._analyze_dimension(
+                context, signal_ctx, ht_result, ds_result, dim_key, fast_mode
+            )
             for dim_key in ("tech", "app", "policy", "capital")
         ]
 
@@ -204,6 +225,17 @@ class TrendAgent:
             "policy_trend": dimensions.get("policy_trend", {}),
             "capital_trend": dimensions.get("capital_trend", {}),
             "cross_dimension_signals": cross_signals,
+            # V2 新增：锚点引用追踪
+            "anchor_references": {
+                "hot_topics_used": [
+                    h.get("topic_id", "")
+                    for h in (ht_result or {}).get("hot_topics") or []
+                ],
+                "events_used": [
+                    e.get("event_id", "")
+                    for e in (ds_result or {}).get("events") or []
+                ],
+            },
         }
 
         logger.info(f"[TrendAgent] 分析完成，4 个维度均已输出")
@@ -212,27 +244,44 @@ class TrendAgent:
     async def _analyze_dimension(
         self,
         context: DailyReportContext,
+        signal_ctx: Optional[SignalContext],
+        ht_result: Optional[dict],
+        ds_result: Optional[dict],
         dim_key: str,
+        fast_mode: bool = False,
     ) -> dict:
         """分析单个维度（单个 Sub-Node）"""
         dim_name = DIM_LABELS.get(dim_key, dim_key)
         system_prompt = DIM_SYSTEM_PROMPTS.get(dim_key, "")
         keywords = DIM_KEYWORDS.get(dim_key, [])
 
-        # ── 为每个维度筛选相关文章（减少 token 消耗）───────────────────
-        relevant = self._filter_by_keywords(context.articles, keywords)
-        # 无匹配则用前20篇
+        # ── 为每个维度筛选相关文章（V2：优先从锚点文章中选取）──────────
+        relevant = self._filter_by_dim_context(
+            context, signal_ctx, ht_result, ds_result, keywords
+        )
         if not relevant:
             relevant = context.articles[:20]
+        if fast_mode:
+            relevant = relevant[:12]
 
         logger.debug(
             f"[TrendAgent][{dim_name}] 筛选出 {len(relevant)} 篇相关文章"
         )
 
-        articles_text = self._build_articles_text(relevant)
+        articles_text = self._build_articles_text(
+            relevant,
+            max_items=12 if fast_mode else 25,
+            summary_limit=180 if fast_mode else 300,
+        )
+
+        # 构建锚点上下文提示（V2 新增）
+        anchor_hint = self._build_anchor_hint(ht_result, ds_result, dim_key)
+
         user_prompt = f"""## 今日文章（共 {len(relevant)} 篇，{dim_name}维度）
 
 {articles_text}
+
+{anchor_hint}
 
 ## 输出要求
 按【{dim_name}】维度分析以上文章，输出 JSON：
@@ -243,63 +292,162 @@ class TrendAgent:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            json_mode=fast_mode,
         )
 
         parsed = self.llm._extract_json(raw_response)
         if not parsed:
             logger.warning(
-                f"[TrendAgent][{dim_name}] LLM 返回格式异常: {raw_response[:200]}"
+                f"[TrendAgent][{dim_name}] LLM 返回格式异常，尝试 json_mode 重试..."
             )
+            try:
+                raw_retry = await self.llm.ainvoke(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    json_mode=True,
+                )
+                parsed = self.llm._extract_json(raw_retry)
+                if parsed:
+                    logger.info(f"[TrendAgent][{dim_name}] json_mode 重试成功")
+                else:
+                    logger.warning(
+                        f"[TrendAgent][{dim_name}] json_mode 仍解析失败: {raw_retry[:200]}"
+                    )
+                    parsed = {}
+            except Exception as e2:
+                logger.error(f"[TrendAgent][{dim_name}] json_mode 重试失败: {e2}")
+                parsed = {}
+
+        if not parsed:
             return {
                 "dimension": dim_name,
-                "summary": "该维度今日无显著趋势",
+                "summary": "该维度分析失败",
                 "signals": [],
                 "confidence": "low",
+                "error": "LLM 返回为空或解析失败",
             }
-
-        # 确保 dimension 字段存在
         if "dimension" not in parsed:
             parsed["dimension"] = dim_name
 
         return parsed
+
+    def _filter_by_dim_context(
+        self,
+        context: DailyReportContext,
+        signal_ctx: Optional[SignalContext],
+        ht_result: Optional[dict],
+        ds_result: Optional[dict],
+        keywords: list[str],
+    ) -> list[dict]:
+        """
+        V2 新增：为每个维度优先从锚点相关的文章中提取
+
+        策略：
+        1. 从 Agent1 的热点文章（hot_topic_articles）中提取
+        2. 从 Agent2 的事件相关文章（events_with_context）中提取
+        3. 用关键词进一步过滤
+        4. 如果不足 15 篇，补充信号评分文章
+        """
+        # 从上下文优先获取文章列表
+        candidates = []
+
+        # 1. HotTopics 锚点文章
+        if ht_result and ht_result.get("hot_topic_articles"):
+            ht_ids = set(ht_result.get("hot_topic_articles", []))
+            scored = (signal_ctx.scored_articles if signal_ctx else None) or context.articles
+            for a in scored:
+                if a.get("id", "") in ht_ids:
+                    candidates.append(a)
+
+        # 2. DeepSummary 事件文章
+        if ds_result and ds_result.get("events_with_context"):
+            ds_ids = set()
+            for evt in ds_result.get("events_with_context", []):
+                for ra in evt.get("related_articles", []):
+                    ds_ids.add(ra.get("article_id", ""))
+            scored = (signal_ctx.scored_articles if signal_ctx else None) or context.articles
+            for a in scored:
+                if a.get("id", "") in ds_ids and a not in candidates:
+                    candidates.append(a)
+
+        # 3. 关键词过滤（在整个候选集中过滤）
+        filtered = []
+        for a in candidates:
+            text = ((a.get("title") or "") + " " + (a.get("summary") or "")).lower()
+            if any(kw.lower() in text for kw in keywords):
+                filtered.append(a)
+            elif len(filtered) < 5:
+                filtered.append(a)
+
+        # 4. 补充：如果不足 15 篇，从信号评分文章中补充
+        if len(filtered) < 15 and signal_ctx and signal_ctx.scored_articles:
+            scored_ids = {a.get("id", "") for a in candidates}
+            for a in signal_ctx.scored_articles:
+                if a.get("id", "") not in scored_ids:
+                    text2 = (a.get("title") or "") + " " + (a.get("summary") or "")
+                    if any(kw.lower() in text2.lower() for kw in keywords):
+                        filtered.append(a)
+                        if len(filtered) >= 15:
+                            break
+
+        return filtered[:25]
+
+    def _build_anchor_hint(
+        self,
+        ht_result: Optional[dict],
+        ds_result: Optional[dict],
+        dim_key: str,
+    ) -> str:
+        """为维度分析构建锚点上下文提示"""
+        hints = []
+
+        if ht_result and ht_result.get("hot_topics"):
+            hots = ht_result["hot_topics"][:3]
+            hint_parts = ["【今日热点锚点参考】："]
+            for h in hots:
+                hint_parts.append(
+                    f"- {h.get('topic_name', '')}"
+                    f"（composite={h.get('composite_score', 0):.1f}）"
+                )
+            hints.append("\n".join(hint_parts))
+
+        if ds_result and ds_result.get("events"):
+            events = ds_result["events"][:2]
+            hint_parts = ["【今日重要事件参考】："]
+            for e in events:
+                hint_parts.append(
+                    f"- {e.get('topic', '')}"
+                    f"（importance={e.get('importance_score', 0)}）"
+                )
+            hints.append("\n".join(hint_parts))
+
+        if hints:
+            return "\n".join(hints) + "\n"
+        return ""
 
     def _filter_by_keywords(
         self,
         articles: list[dict],
         keywords: list[str],
     ) -> list[dict]:
-        """根据关键词筛选相关文章"""
+        """根据关键词筛选相关文章（回退方法）"""
         if not keywords:
             return articles[:20]
 
         matched = []
         for a in articles:
-            text = (
-                (a.get("title") or "") + " " + (a.get("summary") or "")
-            ).lower()
+            text = ((a.get("title") or "") + " " + (a.get("summary") or "")).lower()
             if any(kw.lower() in text for kw in keywords):
                 matched.append(a)
         return matched
-
-    def _build_articles_text(self, articles: list[dict]) -> str:
-        """将文章列表格式化为 LLM 输入文本"""
-        lines = []
-        for i, a in enumerate(articles[:25], 1):
-            title = a.get("title", "无标题")
-            summary = (a.get("summary") or "无摘要")[:300]
-            source = a.get("source", "未知来源")
-            lines.append(
-                f"[{i}] 来源：{source}\n"
-                f"    标题：{title}\n"
-                f"    摘要：{summary}"
-            )
-        return "\n\n".join(lines)
 
     def _extract_cross_signals(self, dimensions: dict) -> list[str]:
         """
         提取跨维度高置信度信号
 
-        策略：置信度为 high 的信号，优先收录
+        V2 增强：同时引用锚点事件，使信号可追溯
         """
         cross_signals = []
         dim_label_map = {
@@ -318,3 +466,28 @@ class TrendAgent:
                     cross_signals.append(f"【{label}】{sig}")
 
         return cross_signals[:5]
+
+    def _build_articles_text(
+        self,
+        articles: list[dict],
+        max_items: int = 25,
+        summary_limit: int = 300,
+    ) -> str:
+        """将文章列表格式化为 LLM 输入文本"""
+        lines = []
+        for i, a in enumerate(articles[:max_items], 1):
+            title = a.get("title", "无标题")
+            summary = (a.get("summary") or "无摘要")[:summary_limit]
+            source = a.get("source", "未知来源")
+            composite = a.get("composite_score", 0)
+
+            sig_info = ""
+            if composite > 0:
+                sig_info = f" | 信号={composite:.2f}"
+
+            lines.append(
+                f"[{i}] 来源：{source}{sig_info}\n"
+                f"    标题：{title}\n"
+                f"    摘要：{summary}"
+            )
+        return "\n\n".join(lines)

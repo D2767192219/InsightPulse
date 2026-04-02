@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>InsightPulse 控制台</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="https://unpkg.com/force-graph"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">InsightPulse</div>
+        <nav>
+          <button :class="{ active: tab === 'report' }" @click="switchTab('report')">日报</button>
+          <button :class="{ active: tab === 'table' }" @click="switchTab('table')">数据表</button>
+          <button :class="{ active: tab === 'graph' }" @click="switchTab('graph')">关系图</button>
+        </nav>
+      </header>
+
+      <main>
+        <!-- Page 1: 日报生成 -->
+        <section v-if="tab === 'report'" class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>生成日报</h2>
+              <p class="muted">调用后端串行四智能体，分析最近 7 天文章。</p>
+            </div>
+            <div class="actions">
+              <label class="toggle">
+                <input type="checkbox" v-model="reportOptions.fastMode" />
+                <span>性能模式</span>
+              </label>
+              <button :disabled="loading.generate" @click="generateReport">
+                {{ loading.generate ? '生成中...' : '重新生成日报' }}
+              </button>
+              <button :disabled="loading.articles || loading.list" @click="fetchLatest7DaysData">
+                获取7天最新数据
+              </button>
+            </div>
+          </div>
+          <div v-if="progressMsg" class="info">{{ progressMsg }}</div>
+
+          <div class="grid two">
+            <div class="card">
+              <h3>日报列表</h3>
+              <ul class="list">
+                <li v-for="r in reports" :key="r.report_id">
+                  <span>{{ r.date }} {{ (r.generated_at || '').slice(11,19) }} · {{ r.articles_count }} 篇</span>
+                  <button @click="loadReport(r.report_id)">查看</button>
+                </li>
+              </ul>
+              <div class="pager">
+                <button :disabled="loading.list || reportPage <= 1" @click="prevReportPage">上一页</button>
+                <span>第 {{ reportPage }} / {{ reportPages }} 页 · 共 {{ reportTotal }} 份</span>
+                <button :disabled="loading.list || reportPage >= reportPages" @click="nextReportPage">下一页</button>
+              </div>
+            </div>
+            <div class="card">
+              <h3>最新结果</h3>
+              <div v-if="currentReport">
+                <p><strong>日期：</strong>{{ currentReport.date }}</p>
+                <p><strong>摘要：</strong>{{ currentReport.executive_summary?.headline || '—' }}</p>
+                <p><strong>风险等级：</strong>{{ currentReport.executive_summary?.risk_level || '—' }}</p>
+                <p><strong>热点数：</strong>{{ (currentReport.hot_topics?.items || currentReport.hot_topics || []).length }}</p>
+                <button @click="setGraphFromReport()">查看数据仓库关系图</button>
+              </div>
+              <p v-else class="muted">尚未加载日报</p>
+            </div>
+          </div>
+
+          <div v-if="currentReport?.markdown_report" class="card">
+            <details>
+              <summary>Markdown 全文</summary>
+              <pre class="mono">{{ currentReport.markdown_report }}</pre>
+            </details>
+          </div>
+          <p v-if="generateError" class="error">{{ generateError }}</p>
+        </section>
+
+        <!-- Page 2: 数据表 -->
+        <section v-if="tab === 'table'" class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>文章数据表</h2>
+              <p class="muted">按数据源/日期/热度筛选排序，类似 SQL 视图。</p>
+            </div>
+            <div class="filters">
+              <label>数据源
+                <input v-model="filters.source" placeholder="如 arXiv / OpenAI" />
+              </label>
+              <label>开始日期
+                <input type="date" v-model="filters.start" />
+              </label>
+              <label>结束日期
+                <input type="date" v-model="filters.end" />
+              </label>
+              <label>排序
+                <select v-model="filters.sort">
+                  <option value="score_desc">热度 ↓</option>
+                  <option value="score_asc">热度 ↑</option>
+                  <option value="time_desc">时间 ↓</option>
+                  <option value="time_asc">时间 ↑</option>
+                </select>
+              </label>
+              <button :disabled="loading.articles" @click="applyFilters">查询</button>
+              <button :disabled="loading.articles" @click="setSort('time_desc')">按日期排名</button>
+              <button :disabled="loading.articles" @click="setSort('score_desc')">按热度排名</button>
+              <button :disabled="loading.recompute || loading.articles" @click="recalculateHeat">
+                {{ loading.recompute ? '重算中...' : '重新计算热度' }}
+              </button>
+            </div>
+          </div>
+          <div class="card table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>标题</th>
+                  <th>来源</th>
+                  <th>发布时间</th>
+                  <th>热度</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="a in articles" :key="a.id">
+                  <td><a :href="a.url" target="_blank">{{ a.title }}</a></td>
+                  <td>{{ a.source }}</td>
+                  <td>{{ a.published_at ? a.published_at.slice(0,16) : '' }}</td>
+                  <td>{{ a.composite_score !== null && a.composite_score !== undefined ? Number(a.composite_score).toFixed(2) : '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="articles.length === 0" class="muted">暂无数据</p>
+            <div class="pager">
+              <button :disabled="loading.articles || tablePage <= 1" @click="prevPage">上一页</button>
+              <span>第 {{ tablePage }} / {{ tablePages }} 页 · 共 {{ tableTotal }} 条</span>
+              <button :disabled="loading.articles || tablePage >= tablePages" @click="nextPage">下一页</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page 3: 关系图 -->
+        <section v-if="tab === 'graph'" class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>关系图网络</h2>
+              <p class="muted">基于全量数据仓库（文章 / 来源 / 标签）自动构建关系网络。</p>
+            </div>
+            <div class="filters">
+              <label>时间范围(天)
+                <input type="number" min="1" max="3650" v-model.number="graphOptions.days" />
+              </label>
+              <label>文章上限
+                <input type="number" min="50" max="1200" v-model.number="graphOptions.maxArticles" />
+              </label>
+              <button :disabled="loading.list" @click="fetchWarehouseGraph">刷新关系图</button>
+            </div>
+          </div>
+          <p v-if="graphMeta" class="muted">
+            文章 {{ graphMeta.article_count }} · 来源 {{ graphMeta.source_count }} · 标签 {{ graphMeta.tag_count }}
+          </p>
+          <p v-if="graphError" class="error">{{ graphError }}</p>
+          <div id="graph" class="graph"></div>
+        </section>
+      </main>
+    </div>
+    <script src="./main.js"></script>
+  </body>
+</html>

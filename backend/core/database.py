@@ -558,19 +558,23 @@ class Database:
         await self.conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_reports (
                 id              TEXT PRIMARY KEY,
-                date            TEXT NOT NULL UNIQUE,
+                date            TEXT NOT NULL,
                 report_json     TEXT NOT NULL,
                 markdown_report TEXT,
                 articles_count  INTEGER NOT NULL DEFAULT 0,
                 hot_topics      TEXT,
                 deep_summaries  TEXT,
                 trend_insights  TEXT,
+                opportunity_signals TEXT,
                 generated_at    TEXT NOT NULL,
                 created_at      TEXT NOT NULL
             )
         """)
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_reports_date ON daily_reports(date)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reports_generated_at ON daily_reports(generated_at DESC)"
         )
 
         # ── Report Tasks ─────────────────────────────────────────────────────────
