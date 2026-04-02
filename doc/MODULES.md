@@ -8,16 +8,25 @@
 
 | 模块 | 文件路径 | 功能说明 |
 |------|---------|---------|
-| **配置管理** | `core/config.py` | Pydantic Settings 管理环境变量（调度间隔等） |
-| **数据库连接** | `core/database.py` | aiosqlite 异步 SQLite 连接，自动建表（feeds/articles） |
+| **配置管理** | `core/config.py` | Pydantic Settings 管理环境变量（LLM API、Scheduler 等） |
+| **数据库连接** | `core/database.py` | aiosqlite 异步 SQLite 连接，自动建表（feeds/articles/daily_reports/report_tasks） |
 | **统一响应** | `core/responses.py` | 标准化 API 返回格式（success/error） |
 | **数据模型** | `models/article.py` | Article、Feed、CrawlResult 等 Pydantic 模型 |
 | **RSS 爬虫服务** | `services/rss_crawler.py` | 核心爬虫逻辑，支持 8 个默认 AI 源，URL 去重 |
 | **Feeds API** | `api/v1/feeds.py` | 增删查、单独爬取、全量爬取、种子数据接口 |
 | **Articles API** | `api/v1/articles.py` | 分页列表、条件筛选、详情、删除、统计接口 |
-| **API 路由聚合** | `api/v1/router.py` | v1 版本路由总览 |
+| **Reports API** | `api/v1/reports.py` | 手动触发日报生成、获取指定日期日报、日报列表 |
+| **API 路由聚合** | `api/v1/router.py` | v1 版本路由总览（feeds/articles/reports） |
 | **调度器** | `scheduler/jobs.py` | APScheduler 自动爬取任务（默认 30 分钟间隔） |
 | **FastAPI 入口** | `main.py` | 应用启动/关闭生命周期、CORS、路由注册 |
+| **LLM 客户端** | `agents/llms/base.py` | 统一 OpenAI 兼容 Client，支持豆包/DeepSeek/Kimi 等，含指数退避重试 |
+| **Orchestrator** | `agents/orchestrator/agent.py` | 日报编排器，Fan-Out/Fan-In 模式，并行调度 3 个分析 Agent |
+| **热点发现 Agent** | `agents/hot_topics/agent.py` | 识别 AI 领域最热话题，SortNode→ScoreNode→RankNode 流水线 |
+| **深度总结 Agent** | `agents/deep_summary/agent.py` | 重要事件深度摘要，What/Who/Why/Impact 结构化输出 |
+| **趋势洞察 Agent** | `agents/trend/agent.py` | 四维度趋势分析（技术/应用/政策/资本），4 个 Sub-Nodes 并行 |
+| **报告聚合 Agent** | `agents/report_composer/agent.py` | 汇总三路输出，生成 JSON + Markdown 双格式日报 |
+| **环境变量示例** | `env.example` | 包含豆包 1.8 及主流模型配置说明 |
+| **架构设计文档** | `guide/multi-agent-daily-report-architecture.md` | 多智能体日报模块完整架构设计 |
 | **单元测试** | `tests/test_models.py` | 模型验证测试 |
 | **单元测试** | `tests/test_rss_crawler.py` | 爬虫核心逻辑测试 |
 | **单元测试** | `tests/test_responses.py` | 响应工具测试 |
@@ -41,6 +50,8 @@
 
 ## API 接口一览
 
+### Articles & Feeds
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/api/v1/articles/` | 分页查询文章（支持来源/关键词/时间过滤） |
@@ -54,8 +65,67 @@
 | `GET` | `/api/v1/feeds/{id}/crawl` | 手动爬取指定源 |
 | `POST` | `/api/v1/feeds/crawl-all` | 全量爬取所有启用的源 |
 | `POST` | `/api/v1/feeds/seed-default` | 写入 8 个默认 AI 源 |
+
+### Reports（多智能体日报）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/v1/reports/generate` | 手动触发日报生成（Fan-Out 并行 3 Agent） |
+| `GET` | `/api/v1/reports/{date}` | 获取指定日期日报（YYYY-MM-DD） |
+| `GET` | `/api/v1/reports/` | 日报列表（分页） |
+
+### Health
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
 | `GET` | `/` | 健康检查 |
 | `GET` | `/health` | 详细健康状态 |
+
+---
+
+## 多智能体日报模块
+
+### 架构概览
+
+```
+[Orchestrator]
+     │  build_context() → 从 SQLite 读文章
+     │
+  ┌──▼──┐    ┌──▼──┐    ┌──▼──┐
+  │Hot   │ ✕  │Deep │ ✕  │Trend│
+  │Topics│    │Sum  │    │Agent│
+  │Agent │    │Agent│    │     │
+  └──┬──┘    └──┬──┘    └──┬──┘
+     │          │          │
+     └──────────┼──────────┘
+                │ fan_in()
+                ▼
+      [Report Composer]
+                │
+                ▼
+         日报 JSON + Markdown
+```
+
+### Agent 流水线
+
+| Agent | 内部节点 | 输出 |
+|-------|---------|------|
+| **HotTopics** | SortNode→ScoreNode→DedupeNode→RankNode | Top 10 热点榜单 |
+| **DeepSummary** | GroupNode→ExtractNode→StructureNode→ImpactNode | What/Who/Why/Impact 事件摘要 |
+| **Trend** | 4 Sub-Nodes 并行：Tech/App/Policy/Capital | 四维度趋势洞察 + 跨维度信号 |
+| **Report Composer** | 汇总三路→JSON摘要→Markdown正文 | 完整日报 |
+
+### LLM 模型支持
+
+默认使用豆包 1.8（`doubao-1-5-latest`），通过 `env.example` 可快速切换：
+
+- **豆包 1.8** — `ark.cn-beijing.volces.com`（推荐，延迟低）
+- **DeepSeek** — `api.deepseek.com`
+- **Kimi / Moonshot** — `api.moonshot.cn`
+- **通义千问** — `dashscope.aliyuncs.com`
+- **AIHubMix（Gemini）** — `aihubmix.com`
+
+切换模型只需修改 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL` 三个环境变量。
 
 ---
 
@@ -85,3 +155,4 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 |------|---------|
 | 2026-04-02 | 初始模块文档，涵盖 RSS 自动爬取 AI 资讯功能全部模块 |
 | 2026-04-02 | 存储层从 MongoDB (Docker) 迁移至 SQLite（aiosqlite），移除 Docker 依赖，MVP 更轻量 |
+| 2026-04-02 | 新增多智能体日报模块：Orchestrator + HotTopics + DeepSummary + Trend + Report Composer Agent，Fan-Out/Fan-In 并行架构，支持豆包 1.8 及主流模型 |

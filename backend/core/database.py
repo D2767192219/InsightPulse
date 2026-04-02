@@ -90,6 +90,48 @@ class Database:
                 tokenize='unicode61 remove_diacritics 1'
             )
         """)
+
+        # ── Daily Reports ────────────────────────────────────────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_reports (
+                id              TEXT PRIMARY KEY,
+                date            TEXT NOT NULL UNIQUE,
+                report_json     TEXT NOT NULL,
+                markdown_report TEXT,
+                articles_count  INTEGER NOT NULL DEFAULT 0,
+                hot_topics      TEXT,
+                deep_summaries TEXT,
+                trend_insights  TEXT,
+                generated_at    TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            )
+        """)
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reports_date ON daily_reports(date)"
+        )
+
+        # ── Report Tasks ──────────────────────────────────────────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS report_tasks (
+                id              TEXT PRIMARY KEY,
+                report_date     TEXT NOT NULL,
+                agent_name      TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                started_at      TEXT,
+                completed_at    TEXT,
+                duration_seconds REAL,
+                error_message   TEXT,
+                output_data     TEXT,
+                created_at      TEXT NOT NULL
+            )
+        """)
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_report_date ON report_tasks(report_date)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON report_tasks(status)"
+        )
+
         await self.conn.commit()
         logger.info("Database schema initialised.")
 

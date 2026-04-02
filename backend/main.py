@@ -1,7 +1,12 @@
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# 加载 backend/.env 到 os.environ，确保所有模块（尤其是 agents/llms/base.py）都能读取
+load_dotenv(Path(__file__).parent / ".env")
 
 from core.config import get_settings
 from core.database import connect_db, close_db_connection
