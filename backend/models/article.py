@@ -1,13 +1,23 @@
 from datetime import datetime
+from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
+
+
+class SourceType(str, Enum):
+    """Article source category for routing to the correct metadata table."""
+    OFFICIAL = "official"
+    ACADEMIC = "academic"
+    MEDIA = "media"
+    SOCIAL = "social"
+    AGGREGATE = "aggregate"
 
 
 class ArticleBase(BaseModel):
     """Base article model with common fields."""
     title: str = Field(..., description="Article title")
     url: str = Field(..., description="Original article URL")
-    source: str = Field(..., description="Source name (e.g., arXiv, Hugging Face)")
+    source: str = Field(..., description="Source name (e.g., arXiv, TechCrunch)")
     source_url: Optional[str] = Field(None, description="Source homepage URL")
     author: Optional[str] = Field(None, description="Article author(s)")
     published_at: Optional[datetime] = Field(None, description="Publication datetime")
@@ -22,10 +32,13 @@ class ArticleBase(BaseModel):
 class ArticleCreate(ArticleBase):
     """Model for creating a new article during crawl."""
     feed_id: str = Field(..., description="RSS feed ID this article came from")
+    source_type: SourceType = Field(..., description="Source category: official/academic/media/social/aggregate")
     external_id: Optional[str] = Field(None, description="Original GUID/ID from source feed")
     content_hash: Optional[str] = Field(None, description="MD5 hash of content for deduplication")
     content_fetched: bool = Field(default=False, description="Whether full content was fetched")
     fetched_at: datetime = Field(default_factory=datetime.utcnow, description="When this article was fetched")
+    has_code: bool = Field(default=False, description="Summary contains code/GitHub/Colab keywords")
+    has_dataset: bool = Field(default=False, description="Summary mentions dataset/benchmark")
 
 
 class ArticleInDB(ArticleBase):
@@ -33,9 +46,12 @@ class ArticleInDB(ArticleBase):
     id: str
     external_id: Optional[str] = None
     feed_id: str
+    source_type: SourceType
     content_hash: Optional[str] = None
     content_fetched: bool = False
     fetched_at: datetime
+    has_code: bool = False
+    has_dataset: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -45,12 +61,15 @@ class ArticleInDB(ArticleBase):
 
 class ArticleResponse(ArticleBase):
     """API response model for an article."""
-    id: str = Field(..., description="Article ID")
+    id: str
     feed_id: str
+    source_type: SourceType
     external_id: Optional[str] = None
     content_hash: Optional[str] = None
     content_fetched: bool = False
     reading_time_minutes: Optional[int] = None
+    has_code: bool = False
+    has_dataset: bool = False
     fetched_at: datetime
     created_at: datetime
 
@@ -61,6 +80,7 @@ class FeedBase(BaseModel):
     url: str = Field(..., description="RSS feed URL")
     source: str = Field(..., description="Source name")
     source_url: Optional[str] = Field(None, description="Source homepage URL")
+    source_type: SourceType = Field(default=SourceType.MEDIA, description="Source category")
     category: str = Field(default="AI", description="Feed category")
     enabled: bool = Field(default=True, description="Whether this feed is active")
     description: Optional[str] = Field(None, description="Feed description")

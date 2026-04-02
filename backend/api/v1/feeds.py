@@ -15,6 +15,7 @@ def _row_to_feed(row) -> dict:
         "url": d["url"],
         "source": d["source"],
         "source_url": d.get("source_url"),
+        "source_type": d.get("source_type"),
         "category": d["category"],
         "enabled": bool(d["enabled"]),
         "description": d.get("description"),

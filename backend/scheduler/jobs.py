@@ -10,11 +10,11 @@ scheduler = AsyncIOScheduler()
 
 
 async def crawl_all_feeds_job():
-    """Scheduled job to crawl all RSS feeds."""
+    """Scheduled job to crawl all RSS feeds (last 7 days by default)."""
     logger.info("Starting scheduled RSS crawl...")
     try:
         crawler = RSSCrawler()
-        results = await crawler.crawl_all_feeds()
+        results = await crawler.crawl_all_feeds(days=7)
         await crawler.close()
 
         total_fetched = sum(r.articles_fetched for r in results)

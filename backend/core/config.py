@@ -12,6 +12,10 @@ class Settings(BaseSettings):
 
     # ── Scheduler ──────────────────────────────────────────────────────────
     SCHEDULER_ENABLED: bool = True
+
+    # ── Database ──────────────────────────────────────────────────────────────
+    DB_DIR: Path = Path(__file__).parent.parent / "data"
+    DB_NAME: str = "insightpulse.db"
     CRAWL_INTERVAL_MINUTES: int = 30
 
     # ── LLM API ─────────────────────────────────────────────────────────────

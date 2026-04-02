@@ -27,6 +27,8 @@
 | **报告聚合 Agent** | `agents/report_composer/agent.py` | 汇总三路输出，生成 JSON + Markdown 双格式日报 |
 | **环境变量示例** | `env.example` | 包含豆包 1.8 及主流模型配置说明 |
 | **架构设计文档** | `guide/multi-agent-daily-report-architecture.md` | 多智能体日报模块完整架构设计 |
+| **V2 事件预测架构** | `docs/v2-event-prediction-architecture.md` | 基于 BettaFish 的多信号预测架构方案（ScoringEngine + ClusteringEngine + PEST/SWOT） |
+| **V2 数据源 Schema** | `docs/v2-data-source-schema.md` | 25 个 RSS 数据源分析 + 分源扩展表设计（arxiv/hn/media/official） |
 | **单元测试** | `tests/test_models.py` | 模型验证测试 |
 | **单元测试** | `tests/test_rss_crawler.py` | 爬虫核心逻辑测试 |
 | **单元测试** | `tests/test_responses.py` | 响应工具测试 |
